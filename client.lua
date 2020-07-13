@@ -1,5 +1,6 @@
 local SDL = require "SDL"
 local image = require "SDL.image"
+local ani = require "ani"
 
 function init()
 	local ret, err = SDL.init {SDL.flags.Video}
@@ -14,13 +15,21 @@ function init()
 	end
 end
 
-local function ensure_image(rdr, filename)
+local function ensure_texture(rdr, filename)
 	filename = "res/" .. filename .. ".png"
 	local img, ret = image.load(filename)
 	if not img then
 		error(err)
 	end
 	return rdr:createTextureFromSurface(img)
+end
+
+local function ensure_animation(rdr, filenames, fps)
+	local seq = {}
+	for i, f in ipairs(filenames) do
+		seq[i] = ensure_texture(rdr, f)
+	end
+	return ani.Animation.new(seq, fps)
 end
 
 local End = {
@@ -67,16 +76,17 @@ function Game.new()
 		w = 20,
 		h = 20,
 		size = 30,
-		fps = 2,
+		logic_fps = 2,
+		fps = 30,
 		running = false,
 		gameover = false,
 		snake = nil,
 		food = nil,
-		res = { }
+		res = {}
 	}
-	o.width = o.w * o.size
-	o.height = o.w * o.size
 
+	o.width = o.w * o.size
+	o.height = o.h * o.size
 	local win, err =
 		SDL.createWindow {
 		title = "GREEDY SNAKE",
@@ -95,18 +105,26 @@ function Game.new()
 	end
 	o.rdr = rdr
 
-	o.res.apple = ensure_image(rdr, "apple")
+	o.res.apple = ensure_texture(rdr, "apple")
 	return setmetatable(o, Game)
 end
 
 function Game:loop()
 	self:start()
 	local frame_time = 1000.0 / self.fps
+	local rate = self.fps / self.logic_fps
+	local frame_count = 0
 	self.running = true
 
 	while self.running do
+		frame_count = frame_count + 1
 		local ticks = SDL.getTicks()
-		self:on_update()
+		if frame_count == rate then
+			frame_count = 0
+			self:update_input()
+			self:update_logic()
+		end
+		self:on_render(ticks)
 		local dt = SDL.getTicks() - ticks
 		if dt < frame_time then
 			SDL.delay(math.floor(frame_time - dt))
@@ -167,7 +185,7 @@ function Game:update_food()
 end
 
 function Game:dot(color, x, y)
-	local size = self.width / self.w
+	local size = self.size
 	self.rdr:setDrawColor(color)
 	self.rdr:fillRect(
 		{
@@ -180,7 +198,7 @@ function Game:dot(color, x, y)
 end
 
 function Game:draw(texture, x, y, angle, flip)
-	local size = self.width / self.w
+	local size = self.size
 	self.rdr:copyEx(
 		{
 			texture = texture,
@@ -204,10 +222,10 @@ function Game:render_food()
 	end
 end
 
-function Game:on_render()
+function Game:on_render(tick)
 	self:clean_canvas()
 	self:render_food()
-	self.snake:on_render(self)
+	self.snake:on_render(self, tick)
 	if self.gameover then
 		for y, l in ipairs(End) do
 			for x, v in ipairs(l) do
@@ -242,12 +260,6 @@ function Game:update_input()
 	end
 end
 
-function Game:on_update()
-	self:update_input()
-	self:update_logic()
-	self:on_render()
-end
-
 function Game:update_logic()
 	if self.gameover then
 		return
@@ -274,10 +286,10 @@ function Snake.new(game, x, y)
 		},
 		direction = 0,
 		res = {
-			[CV_TYPE.SB_BODY] = ensure_image(game.rdr, "snakebody"),
-			[CV_TYPE.SB_HEAD] = ensure_image(game.rdr, "snakehead"),
-			[CV_TYPE.SB_TAIL] = ensure_image(game.rdr, "snaketail"),
-			[CV_TYPE.SB_TURN_LEFT] = ensure_image(game.rdr, "snaketurn"),
+			[CV_TYPE.SB_BODY] = ensure_texture(game.rdr, "snakebody"),
+			[CV_TYPE.SB_HEAD] = ensure_animation(game.rdr, {"snakehead_0", "snakehead_1"}, 4),
+			[CV_TYPE.SB_TAIL] = ensure_animation(game.rdr, {"snaketail_0", "snaketail_1", "snaketail_2"}, 6),
+			[CV_TYPE.SB_TURN_LEFT] = ensure_texture(game.rdr, "snaketurn")
 		}
 	}
 
@@ -308,7 +320,7 @@ function Snake:move(game)
 	if self.direction == last_direction then
 		self.body[1].type = CV_TYPE.SB_BODY
 	else
-		if  (self.direction - last_direction) % 4 == 1 then
+		if (self.direction - last_direction) % 4 == 1 then
 			self.body[1].type = CV_TYPE.SB_TURN_RIGHT
 		else
 			self.body[1].type = CV_TYPE.SB_TURN_LEFT
@@ -334,13 +346,19 @@ function Snake:hit(x, y)
 	return CV_TYPE.EMPTY
 end
 
-function Snake:on_render(game)
+function Snake:on_render(game, tick)
 	for i, v in ipairs(self.body) do
+		local flip = SDL.rendererFlip.None
+		local res = self.res[v.type]
+
 		if v.type == CV_TYPE.SB_TURN_RIGHT then
-			game:draw(self.res[CV_TYPE.SB_TURN_LEFT], v.x, v.y, v.d * 90, SDL.rendererFlip.Horizontal)
-        else
-			game:draw(self.res[v.type], v.x, v.y, v.d * 90)
+			res = self.res[CV_TYPE.SB_TURN_LEFT]
+			flip = SDL.rendererFlip.Horizontal
 		end
+		if getmetatable(res) == ani.Animation then
+			res = res:get_texture(tick)
+		end
+		game:draw(res, v.x, v.y, v.d * 90, flip)
 	end
 end
 
