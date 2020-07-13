@@ -72,6 +72,13 @@ class Snake {
     }
 };
 
+const KEY_MAP = {
+    "ArrowUp": 0,
+    "ArrowLeft": 1,
+    "ArrowDown": 2,
+    "ArrowRight": 3,
+}
+
 class Game {
     canvas;
     snake;
@@ -100,6 +107,7 @@ class Game {
             }
             tbl.appendChild(tr);
         }
+        document.body.addEventListener("keyup", (e) => {this.onKeyboard(e)});
         this.canvas = data;
         this.snake.render(this.canvas)
         
@@ -166,6 +174,13 @@ class Game {
                 this.onTimer(now);
             })
         }
+    }
+
+    onKeyboard(e) {
+        if(this.movable = false) return;
+        let type = KEY_MAP[e.key];
+        if(type == undefined) return;
+        this.moveType = type;
     }
 
     run() {
