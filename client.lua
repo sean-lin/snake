@@ -1,10 +1,26 @@
 local SDL = require "SDL"
+local image = require "SDL.image"
 
 function init()
 	local ret, err = SDL.init {SDL.flags.Video}
 	if not ret then
 		error(err)
 	end
+
+	local formats, ret, err = image.init {image.flags.PNG}
+
+	if not formats[image.flags.PNG] then
+		error(err)
+	end
+end
+
+local function ensure_image(rdr, filename)
+	filename = "res/" .. filename .. ".png"
+	local img, ret = image.load(filename)
+	if not img then
+		error(err)
+	end
+	return rdr:createTextureFromSurface(img)
 end
 
 local End = {
@@ -15,7 +31,7 @@ local End = {
 	{1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1},
 	{1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1},
 	{1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1},
-	{1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1},
+	{1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1}
 }
 local CV_TYPE = {
 	ERROR = -1,
@@ -23,21 +39,23 @@ local CV_TYPE = {
 	SB_HEAD = 1,
 	SB_BODY = 2,
 	SB_TAIL = 3,
-	FOOD = 4
+	FOOD = 4,
+	SB_TURN_LEFT = 5,
+	SB_TURN_RIGHT = 6
 }
 
 local MOVE = {
 	[0] = {0, -1},
-	[1] = {-1, 0},
+	[1] = {1, 0},
 	[2] = {0, 1},
-	[3] = {1, 0}
+	[3] = {-1, 0}
 }
 
 local KEY_MAP = {
 	[SDL.key.Up] = 0,
-	[SDL.key.Left] = 1,
+	[SDL.key.Right] = 1,
 	[SDL.key.Down] = 2,
-	[SDL.key.Right] = 3
+	[SDL.key.Left] = 3
 }
 
 local Snake = {}
@@ -49,14 +67,15 @@ function Game.new()
 		w = 20,
 		h = 20,
 		size = 30,
-		snake = Snake.new(10, 10),
 		fps = 2,
 		running = false,
 		gameover = false,
-		food = nil
+		snake = nil,
+		food = nil,
+		res = { }
 	}
 	o.width = o.w * o.size
-	o.height = o.h * o.size
+	o.height = o.w * o.size
 
 	local win, err =
 		SDL.createWindow {
@@ -75,10 +94,13 @@ function Game.new()
 		error(err)
 	end
 	o.rdr = rdr
+
+	o.res.apple = ensure_image(rdr, "apple")
 	return setmetatable(o, Game)
 end
 
 function Game:loop()
+	self:start()
 	local frame_time = 1000.0 / self.fps
 	self.running = true
 
@@ -117,6 +139,19 @@ function Game:eat(x, y)
 	return false
 end
 
+function Game:clean_canvas()
+	self.rdr:clear()
+	self.rdr:setDrawColor(0xFFE4C4)
+	self.rdr:fillRect(
+		{
+			x = 0,
+			y = 0,
+			w = self.width,
+			h = self.height
+		}
+	)
+end
+
 function Game:update_food()
 	while not self.food do
 		local x = math.floor(math.random() * self.w)
@@ -129,19 +164,6 @@ function Game:update_food()
 			end
 		end
 	end
-end
-
-function Game:clean_canvas()
-	self.rdr:clear()
-	self.rdr:setDrawColor(0xFFE4C4)
-	self.rdr:fillRect(
-		{
-			x = 0,
-			y = 0,
-			w = self.width,
-			h = self.height
-		}
-	)
 end
 
 function Game:dot(color, x, y)
@@ -157,9 +179,28 @@ function Game:dot(color, x, y)
 	)
 end
 
+function Game:draw(texture, x, y, angle, flip)
+	local size = self.width / self.w
+	self.rdr:copyEx(
+		{
+			texture = texture,
+			source = nil,
+			destination = {
+				x = x * size,
+				y = y * size,
+				w = size,
+				h = size
+			},
+			center = nil,
+			angle = angle,
+			flip = flip
+		}
+	)
+end
+
 function Game:render_food()
 	if self.food then
-		self:dot(0x800000, self.food.x, self.food.y)
+		self:draw(self.res.apple, self.food.x, self.food.y)
 	end
 end
 
@@ -169,7 +210,7 @@ function Game:on_render()
 	self.snake:on_render(self)
 	if self.gameover then
 		for y, l in ipairs(End) do
-			for x, v in ipairs(l) do 
+			for x, v in ipairs(l) do
 				if v == 1 then
 					self:dot(0x000080, x + 1, y + 3)
 				end
@@ -180,7 +221,7 @@ function Game:on_render()
 end
 
 function Game:start()
-	self.snake = Snake.new(10, 10)
+	self.snake = Snake.new(self, 10, 10)
 	self.food = nil
 	self.gameover = false
 end
@@ -196,9 +237,15 @@ function Game:update_input()
 			end
 			if e.keysym.sym == SDL.key.r then
 				self:start()
-            end
+			end
 		end
 	end
+end
+
+function Game:on_update()
+	self:update_input()
+	self:update_logic()
+	self:on_render()
 end
 
 function Game:update_logic()
@@ -217,22 +264,23 @@ function Game:update_logic()
 	end
 end
 
-function Game:on_update()
-	self:update_input()
-	self:update_logic()
-	self:on_render()
-end
-
 Snake.__index = Snake
-function Snake.new(x, y)
+function Snake.new(game, x, y)
 	local o = {
 		body = {
 			{x = x, y = y, d = 0, type = CV_TYPE.SB_HEAD},
 			{x = x, y = y + 1, d = 0, type = CV_TYPE.SB_BODY},
 			{x = x, y = y + 2, d = 0, type = CV_TYPE.SB_TAIL}
 		},
-		direction = 0
+		direction = 0,
+		res = {
+			[CV_TYPE.SB_BODY] = ensure_image(game.rdr, "snakebody"),
+			[CV_TYPE.SB_HEAD] = ensure_image(game.rdr, "snakehead"),
+			[CV_TYPE.SB_TAIL] = ensure_image(game.rdr, "snaketail"),
+			[CV_TYPE.SB_TURN_LEFT] = ensure_image(game.rdr, "snaketurn"),
+		}
 	}
+
 	return setmetatable(o, Snake)
 end
 
@@ -251,12 +299,22 @@ function Snake:move(game)
 	elseif target == CV_TYPE.EMPTY then
 		self.body[#self.body] = nil
 		self.body[#self.body].type = CV_TYPE.SB_TAIL
+		self.body[#self.body].d = self.body[#self.body - 1].d
 	else
 		return false
 	end
 
-	self.body[1].type = CV_TYPE.SB_BODY
-	table.insert(self.body, 1, {x = x, y = y, d = type, type = CV_TYPE.SB_HEAD})
+	local last_direction = self.body[1].d
+	if self.direction == last_direction then
+		self.body[1].type = CV_TYPE.SB_BODY
+	else
+		if  (self.direction - last_direction) % 4 == 1 then
+			self.body[1].type = CV_TYPE.SB_TURN_RIGHT
+		else
+			self.body[1].type = CV_TYPE.SB_TURN_LEFT
+		end
+	end
+	table.insert(self.body, 1, {x = x, y = y, d = self.direction, type = CV_TYPE.SB_HEAD})
 	return true
 end
 
@@ -278,7 +336,11 @@ end
 
 function Snake:on_render(game)
 	for i, v in ipairs(self.body) do
-		game:dot(0x008000, v.x, v.y)
+		if v.type == CV_TYPE.SB_TURN_RIGHT then
+			game:draw(self.res[CV_TYPE.SB_TURN_LEFT], v.x, v.y, v.d * 90, SDL.rendererFlip.Horizontal)
+        else
+			game:draw(self.res[v.type], v.x, v.y, v.d * 90)
+		end
 	end
 end
 
