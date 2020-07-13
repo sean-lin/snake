@@ -1,5 +1,7 @@
 #!/bin/env python3
 
+import os.path
+import pathlib
 from select import epoll
 import socket
 import select
@@ -47,11 +49,31 @@ class Body(object):
         return {i: getattr(self, i) for i in ["x", "y", "d", "type"]}
 
 
+class FileDB(object):
+    def __init__(self, path):
+        self.path = path
+        pathlib.Path(self.path).mkdir(parents=True, exist_ok=True)
+
+    def load(self, name):
+        path = os.path.join(self.path, name)
+        if not os.path.exists(path):
+            return None
+        with open(path, "r") as f:
+            return json.load(f)
+
+    def save(self, name, data):
+        path = os.path.join(self.path, name)
+        with open(path, "w+") as f:
+            json.dump(data, f)
+
+
 class Player(object):
     def __init__(self, game, conn):
         self.game = game
         self.conn = conn
         self.peername = conn.getpeername()
+        self.score = 0
+        self.total_score = 0
         self.buf = b""
         self.logined = False
         self.name = "not login"
@@ -68,6 +90,7 @@ class Player(object):
         self.body = []
         self.gameover = False
         self.direction = 0
+        self.score = 0
         x, y = self.game.alloc()
         if x == None:
             self.on_error("allocate pos failed")
@@ -86,9 +109,11 @@ class Player(object):
         x = self.body[0].x + move[0]
         y = self.body[0].y + move[1]
 
-        target = self.game.check_type(x, y)
+        target = self.game.check_move(x, y)
         if target == CV_TYPE.FOOD:
             self.game.eat(x, y)
+            self.score += 1 
+            self.total_score += 1
         elif target == CV_TYPE.EMPTY:
             del self.body[-1]
             self.body[-1].type = CV_TYPE.SB_TAIL
@@ -137,6 +162,8 @@ class Player(object):
         info = {
             "role_id": self.name,
             "gameover": self.gameover,
+            "score": self.score,
+            "total_score": self.total_score,
             "body": [i.info() for i in self.body],
         }
         return info
@@ -157,17 +184,25 @@ class Player(object):
         self.conn.send(body)
 
     def offline(self):
+        if self.logined:
+            self.game.save(self.name, {"total_score": self.total_score})
         self.conn.close()
 
     def on_error(self, err):
-        print("player %s err: %s" % (self.name, self.err))
+        print("player %s err: %s" % (self.name, err))
         self.is_error = True
 
     def handle_login(self, package):
         if self.logined:
             self.on_error("always logined")
             return
+        if self.game.check_logined(package['name']):
+            self.on_error("conflicted")
+            return
         self.name = package["name"]
+        data = self.game.load(self.name)
+        if data:
+            self.total_score = data["total_score"]
         self.logined = True
         game_info = self.game.get_game_info()
         game_info["role_id"] = self.name
@@ -194,6 +229,7 @@ class Game(object):
         self.players = {}
         self.snake = None
         self.food = None
+        self.db = FileDB("db")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -201,6 +237,12 @@ class Game(object):
         sock.listen(5)
         sock.setblocking(0)
         self.sock = sock
+
+    def load(self, name):
+        return self.db.load(name)
+
+    def save(self, name, data):
+        self.db.save(name, data)
 
     def on_logic(self):
         self.snake.move()
@@ -248,7 +290,10 @@ class Game(object):
         for i in self.players:
             self.players[i].send_package(package)
 
-    def check_type(self, x, y):
+    def check_logined(self, name):
+        return any(i.name == name for i in self.players.values())
+
+    def check_move(self, x, y):
         if x < 0 or x >= self.w or y < 0 or y >= self.h:
             return CV_TYPE.ERROR
 

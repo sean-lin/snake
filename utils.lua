@@ -47,7 +47,7 @@ function Connection:waiting(connect_time)
     local rr, rw = lsocket.select(nil, {self.sock}, 0)
     if not rr or not rw or next(rw) == nil then
         connect_time = connect_time + 1
-        if connect_time < CONNECT_TIMEOUT then
+        if connect_time < MAX_CONNECT then
             SDL.delay(100)
             self:waiting(connect_time)
         else

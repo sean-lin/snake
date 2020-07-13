@@ -1,6 +1,10 @@
 local SDL = require "SDL"
 local image = require "SDL.image"
+local font = require "SDL.ttf"
+
 local utils = require "utils"
+--local IP = "30.103.92.249"
+local IP = "127.0.0.1"
 
 function init()
 	local ret, err = SDL.init {SDL.flags.Video}
@@ -11,6 +15,10 @@ function init()
 	local formats, ret, err = image.init {image.flags.PNG}
 
 	if not formats[image.flags.PNG] then
+		error(err)
+	end
+	local ret, err = font.init()
+	if not ret then
 		error(err)
 	end
 end
@@ -30,6 +38,19 @@ local function ensure_animation(rdr, filenames, fps)
 		seq[i] = ensure_texture(rdr, f)
 	end
 	return utils.Animation.new(seq, fps)
+end
+
+local function make_text(rdr, f, txt)
+	local s, err = f:renderUtf8(txt, "solid", 0xFFFFFF)
+	if not s then
+		error(err)
+	end
+
+	local t, err = rdr:createTextureFromSurface(s)
+	if not t then
+		error(err)
+	end
+	return t
 end
 
 local End = {
@@ -85,17 +106,20 @@ function Game.new(name)
 			snake = {},
 			food = nil,
 			name = name,
-			res = {}
+			res = {
+				apple = nil,
+				score_bar = nil
+			}
 		},
 		Game
 	)
 
-	local conn = utils.Connection.new("127.0.0.1", 15320)
+	local conn = utils.Connection.new(IP, 15320)
 	o.conn = conn
 	o:send_package({cmd = "login", name = o.name})
 
 	o.width = o.w * o.size
-	o.height = o.h * o.size
+	o.height = o.h * o.size + o.size -- for bar
 	local win, err =
 		SDL.createWindow {
 		title = "GREEDY SNAKE",
@@ -114,6 +138,11 @@ function Game.new(name)
 	end
 	o.rdr = rdr
 
+	local f, err = font.open("res/DejaVuSans.ttf", o.size)
+	if not f then
+		error(err)
+	end
+	o.font = f
 	o.res.apple = ensure_texture(rdr, "apple")
 	return o
 end
@@ -149,11 +178,11 @@ end
 function Game:process_package()
 	self.conn:read_package(
 		function(package)
-			local cmd = package['cmd']
-			local func = self['handle_' .. cmd]
+			local cmd = package["cmd"]
+			local func = self["handle_" .. cmd]
 			if func then
 				func(self, package)
-            end 
+			end
 		end
 	)
 end
@@ -172,19 +201,35 @@ function Game:handle_init(package)
 	self.snakes = {}
 	for i, v in ipairs(package.snakes) do
 		self.snakes[v.role_id] = Snake.new(self, v.body)
-    end
+		self.snakes[v.role_id].score = v.score
+		self.snakes[v.role_id].total_score = v.total_score
+	end
+	self:update_bar_texture()
 end
 
 function Game:handle_sync_snake(package)
 	local role_id = package.role_id
-	if self.snake[role_id] then
-		self.snakes[role_id]:update_body(package.body)
+	local snake = self.snake[role_id]
+	if snake then
+		snake:update_body(package.body)
 	else
-		self.snakes[role_id] = Snake.new(self, package.body)
-    end
+		snake = Snake.new(self, package.body)
+		self.snakes[role_id] = snake
+	end
 	if role_id == self.role_id then
 		self.gameover = package.gameover
+		if snake.score ~= package.score then
+			snake.score = package.score
+			snake.total_score = package.total_score
+			self:update_bar_texture()
+		end
 	end
+end
+
+function Game:update_bar_texture()
+	local snake = self.snakes[self.role_id]
+	local txt = string.format("score: %d  total score: %d", snake.score, snake.total_score)
+	self.res.score_bar = make_text(self.rdr, self.font, txt)
 end
 
 function Game:clean_canvas()
@@ -196,6 +241,15 @@ function Game:clean_canvas()
 			y = 0,
 			w = self.width,
 			h = self.height
+		}
+	)
+	self.rdr:setDrawColor(0xFF8080)
+	self.rdr:fillRect(
+		{
+			x = 0,
+			y = self.height - self.size,
+			w = self.width,
+			h = self.size
 		}
 	)
 end
@@ -238,6 +292,22 @@ function Game:render_food()
 	end
 end
 
+function Game:render_bar()
+	if self.res.score_bar then
+		local _, _, w, _ = self.res.score_bar:query()
+		self.rdr:copy(
+			self.res.score_bar,
+			nil,
+			{
+				x = 0,
+				y = self.height - self.size,
+				w = w,
+				h = self.size
+			}
+		)
+	end
+end
+
 function Game:on_render(tick)
 	self:clean_canvas()
 	self:render_food()
@@ -253,6 +323,7 @@ function Game:on_render(tick)
 			end
 		end
 	end
+	self:render_bar()
 	self.rdr:present()
 end
 
