@@ -1,6 +1,6 @@
 local SDL = require "SDL"
 local image = require "SDL.image"
-local ani = require "ani"
+local utils = require "utils"
 
 function init()
 	local ret, err = SDL.init {SDL.flags.Video}
@@ -29,7 +29,7 @@ local function ensure_animation(rdr, filenames, fps)
 	for i, f in ipairs(filenames) do
 		seq[i] = ensure_texture(rdr, f)
 	end
-	return ani.Animation.new(seq, fps)
+	return utils.Animation.new(seq, fps)
 end
 
 local End = {
@@ -71,19 +71,28 @@ local Snake = {}
 local Game = {}
 
 Game.__index = Game
-function Game.new()
-	local o = {
-		w = 20,
-		h = 20,
-		size = 30,
-		logic_fps = 2,
-		fps = 30,
-		running = false,
-		gameover = false,
-		snake = nil,
-		food = nil,
-		res = {}
-	}
+function Game.new(name)
+	local o =
+		setmetatable(
+		{
+			w = 20,
+			h = 20,
+			size = 20,
+			logic_fps = 2,
+			fps = 30,
+			running = false,
+			gameover = false,
+			snake = {},
+			food = nil,
+			name = name,
+			res = {}
+		},
+		Game
+	)
+
+	local conn = utils.Connection.new("127.0.0.1", 15320)
+	o.conn = conn
+	o:send_package({cmd = "login", name = o.name})
 
 	o.width = o.w * o.size
 	o.height = o.h * o.size
@@ -106,7 +115,7 @@ function Game.new()
 	o.rdr = rdr
 
 	o.res.apple = ensure_texture(rdr, "apple")
-	return setmetatable(o, Game)
+	return o
 end
 
 function Game:loop()
@@ -124,6 +133,7 @@ function Game:loop()
 			self:update_input()
 			self:update_logic()
 		end
+		self:process_package()
 		self:on_render(ticks)
 		local dt = SDL.getTicks() - ticks
 		if dt < frame_time then
@@ -132,29 +142,49 @@ function Game:loop()
 	end
 end
 
-function Game:check_move(x, y)
-	if x < 0 or x >= self.w or y < 0 or y >= self.h then
-		return CV_TYPE.ERROR
-	end
-
-	if self.food and self.food.x == x and self.food.y == y then
-		return CV_TYPE.FOOD
-	end
-
-	local type = self.snake:hit(x, y)
-	if type ~= CV_TYPE.EMPTY then
-		return type
-	end
-
-	return CV_TYPE.EMPTY
+function Game:send_package(package)
+	self.conn:send_package(package)
 end
 
-function Game:eat(x, y)
-	if self.food and self.food.x == x and self.food.y == y then
+function Game:process_package()
+	self.conn:read_package(
+		function(package)
+			local cmd = package['cmd']
+			local func = self['handle_' .. cmd]
+			if func then
+				func(self, package)
+            end 
+		end
+	)
+end
+
+function Game:handle_sync_food(package)
+	if package.x and package.y then
+		self.food = {x = package.x, y = package.y}
+	else
 		self.food = nil
-		return true
 	end
-	return false
+end
+
+function Game:handle_init(package)
+	self.food = package.food
+	self.role_id = package.role_id
+	self.snakes = {}
+	for i, v in ipairs(package.snakes) do
+		self.snakes[v.role_id] = Snake.new(self, v.body)
+    end
+end
+
+function Game:handle_sync_snake(package)
+	local role_id = package.role_id
+	if self.snake[role_id] then
+		self.snakes[role_id]:update_body(package.body)
+	else
+		self.snakes[role_id] = Snake.new(self, package.body)
+    end
+	if role_id == self.role_id then
+		self.gameover = package.gameover
+	end
 end
 
 function Game:clean_canvas()
@@ -168,20 +198,6 @@ function Game:clean_canvas()
 			h = self.height
 		}
 	)
-end
-
-function Game:update_food()
-	while not self.food do
-		local x = math.floor(math.random() * self.w)
-		local y = math.floor(math.random() * self.h)
-		if self.snake:hit(x, y) == CV_TYPE.EMPTY then
-			local dx = self.snake:head().x - x
-			local dy = self.snake:head().y - y
-			if dx * dx + dy * dy > 9 then
-				self.food = {x = x, y = y}
-			end
-		end
-	end
 end
 
 function Game:dot(color, x, y)
@@ -225,7 +241,9 @@ end
 function Game:on_render(tick)
 	self:clean_canvas()
 	self:render_food()
-	self.snake:on_render(self, tick)
+	for _, snake in pairs(self.snakes) do
+		snake:on_render(self, tick)
+	end
 	if self.gameover then
 		for y, l in ipairs(End) do
 			for x, v in ipairs(l) do
@@ -239,9 +257,18 @@ function Game:on_render(tick)
 end
 
 function Game:start()
-	self.snake = Snake.new(self, 10, 10)
+	self.snakes = {}
+	self.role_id = nil
 	self.food = nil
 	self.gameover = false
+end
+
+function Game:restart()
+	self:send_package(
+		{
+			cmd = "restart"
+		}
+	)
 end
 
 function Game:update_input()
@@ -250,41 +277,32 @@ function Game:update_input()
 			self.running = false
 		elseif e.type == SDL.event.KeyDown then
 			local op = KEY_MAP[e.keysym.sym]
-			if op then
+			if op and self.role_id then
 				self.op = op
 			end
 			if e.keysym.sym == SDL.key.r then
-				self:start()
+				self:restart()
 			end
 		end
 	end
 end
 
 function Game:update_logic()
-	if self.gameover then
-		return
-	end
-	self:update_food()
-
 	if self.op then
-		self.snake:set_direct(self.op)
+		self:send_package(
+			{
+				cmd = "move",
+				op = self.op
+			}
+		)
 		self.op = nil
-	end
-
-	if not self.snake:move(self) then
-		self.gameover = true
 	end
 end
 
 Snake.__index = Snake
-function Snake.new(game, x, y)
+function Snake.new(game, body)
 	local o = {
-		body = {
-			{x = x, y = y, d = 0, type = CV_TYPE.SB_HEAD},
-			{x = x, y = y + 1, d = 0, type = CV_TYPE.SB_BODY},
-			{x = x, y = y + 2, d = 0, type = CV_TYPE.SB_TAIL}
-		},
-		direction = 0,
+		body = body,
 		res = {
 			[CV_TYPE.SB_BODY] = ensure_texture(game.rdr, "snakebody"),
 			[CV_TYPE.SB_HEAD] = ensure_animation(game.rdr, {"snakehead_0", "snakehead_1"}, 4),
@@ -296,54 +314,8 @@ function Snake.new(game, x, y)
 	return setmetatable(o, Snake)
 end
 
-function Snake:head()
-	return self.body[1]
-end
-
-function Snake:move(game)
-	local move = MOVE[self.direction]
-	local x = self.body[1].x + move[1]
-	local y = self.body[1].y + move[2]
-
-	local target = game:check_move(x, y)
-	if target == CV_TYPE.FOOD then
-		game:eat(x, y)
-	elseif target == CV_TYPE.EMPTY then
-		self.body[#self.body] = nil
-		self.body[#self.body].type = CV_TYPE.SB_TAIL
-		self.body[#self.body].d = self.body[#self.body - 1].d
-	else
-		return false
-	end
-
-	local last_direction = self.body[1].d
-	if self.direction == last_direction then
-		self.body[1].type = CV_TYPE.SB_BODY
-	else
-		if (self.direction - last_direction) % 4 == 1 then
-			self.body[1].type = CV_TYPE.SB_TURN_RIGHT
-		else
-			self.body[1].type = CV_TYPE.SB_TURN_LEFT
-		end
-	end
-	table.insert(self.body, 1, {x = x, y = y, d = self.direction, type = CV_TYPE.SB_HEAD})
-	return true
-end
-
-function Snake:set_direct(op)
-	if math.abs(op - self.direction) == 2 then
-		return
-	end
-	self.direction = op
-end
-
-function Snake:hit(x, y)
-	for _i, v in ipairs(self.body) do
-		if x == v.x and y == v.y then
-			return v.type
-		end
-	end
-	return CV_TYPE.EMPTY
+function Snake:update_body(body)
+	self.body = body
 end
 
 function Snake:on_render(game, tick)
@@ -355,7 +327,7 @@ function Snake:on_render(game, tick)
 			res = self.res[CV_TYPE.SB_TURN_LEFT]
 			flip = SDL.rendererFlip.Horizontal
 		end
-		if getmetatable(res) == ani.Animation then
+		if getmetatable(res) == utils.Animation then
 			res = res:get_texture(tick)
 		end
 		game:draw(res, v.x, v.y, v.d * 90, flip)
@@ -363,8 +335,9 @@ function Snake:on_render(game, tick)
 end
 
 function main()
+	local name = arg[1] or "player"
 	init()
-	local game = Game.new()
+	local game = Game.new(name)
 	game:loop()
 end
 
